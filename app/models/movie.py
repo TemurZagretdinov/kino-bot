@@ -9,16 +9,17 @@ from app.database import Base
 class Movie(Base):
     __tablename__ = "movies"
 
-    # Non-unique index on code — serials share the same code across episodes
     __table_args__ = (Index("ix_movies_code", "code"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # Unique constraint removed: serials have multiple rows with the same code
     code: Mapped[str] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(String(255))
-    # "movie" or "serial"
-    content_type: Mapped[str] = mapped_column(String(16), default="movie", server_default="movie")
-    # None for movies; 1, 2, 3... for serial episodes
+    content_type: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="movie",
+        server_default="movie",
+    )
     episode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     movie_link: Mapped[str | None] = mapped_column(Text, nullable=True)

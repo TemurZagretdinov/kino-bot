@@ -8,13 +8,14 @@ class AddMovie(StatesGroup):
     archive_post_link = State()
 
 
-class AddSerial(StatesGroup):
-    """Multi-step FSM for adding a serial with multiple episodes."""
+class SerialAddStates(StatesGroup):
+    waiting_title = State()
+    waiting_code = State()
+    waiting_episode_count = State()
+    waiting_episode_link = State()
 
-    title = State()         # Step 1: serial title
-    code = State()          # Step 2: serial code (e.g. BB01)
-    episode_count = State() # Step 3: how many episodes
-    episode_link = State()  # Step 4 (repeated): link for each episode
+
+AddSerial = SerialAddStates
 
 
 class DeleteMovie(StatesGroup):

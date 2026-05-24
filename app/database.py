@@ -245,26 +245,28 @@ async def _migrate_sqlite_movies_table() -> None:
         if not rows:
             return
 
-        columns = {row[1]: row for row in rows}
-        if "archive_chat_id" not in columns:
-            await conn.execute(text("ALTER TABLE movies ADD COLUMN archive_chat_id VARCHAR(255)"))
-        if "archive_message_id" not in columns:
-            await conn.execute(text("ALTER TABLE movies ADD COLUMN archive_message_id INTEGER"))
-
-        result = await conn.execute(text("PRAGMA table_info(movies)"))
-        current_columns = [row[1] for row in result.fetchall()]
-        desired_columns = [
+        columns = {row[1] for row in rows}
+        required_columns = {
             "id",
             "code",
             "title",
+            "content_type",
+            "episode",
             "description",
             "movie_link",
             "archive_chat_id",
             "archive_message_id",
             "views_count",
             "created_at",
-        ]
-        if current_columns != desired_columns:
+        }
+        legacy_columns = {"message_id", "channel_id", "views"}
+
+        should_rebuild = (
+            not required_columns.issubset(columns)
+            or bool(legacy_columns & columns)
+            or await _sqlite_movies_has_unique_code_index(conn)
+        )
+        if should_rebuild:
             await _rebuild_sqlite_movies_table(conn)
 
 
@@ -462,7 +464,35 @@ async def _rebuild_sqlite_channels_table(conn) -> None:
     logger.info("channels jadvali yangi sxemaga o'tkazildi.")
 
 
+async def _sqlite_movies_has_unique_code_index(conn) -> bool:
+    result = await conn.execute(text("PRAGMA index_list(movies)"))
+    for row in result.fetchall():
+        index_name = row[1]
+        is_unique = bool(row[2])
+        if not is_unique:
+            continue
+
+        index_info = await conn.execute(text(f"PRAGMA index_info({index_name})"))
+        indexed_columns = [info_row[2] for info_row in index_info.fetchall()]
+        if indexed_columns == ["code"]:
+            return True
+    return False
+
+
 async def _rebuild_sqlite_movies_table(conn) -> None:
+    result = await conn.execute(text("PRAGMA table_info(movies)"))
+    columns = {row[1] for row in result.fetchall()}
+
+    def column_expr(name: str, fallback: str) -> str:
+        return name if name in columns else fallback
+
+    archive_chat_expr = column_expr("archive_chat_id", column_expr("channel_id", "NULL"))
+    archive_message_expr = column_expr("archive_message_id", column_expr("message_id", "NULL"))
+    views_expr = column_expr("views_count", column_expr("views", "0"))
+    created_at_expr = column_expr("created_at", "CURRENT_TIMESTAMP")
+    content_type_expr = column_expr("content_type", "'movie'")
+    episode_expr = column_expr("episode", "NULL")
+
     await conn.execute(text("DROP TABLE IF EXISTS movies_new"))
     await conn.execute(
         text(
@@ -471,6 +501,8 @@ async def _rebuild_sqlite_movies_table(conn) -> None:
                 id INTEGER NOT NULL,
                 code VARCHAR(64) NOT NULL,
                 title VARCHAR(255) NOT NULL,
+                content_type VARCHAR(16) DEFAULT 'movie' NOT NULL,
+                episode INTEGER,
                 description TEXT,
                 movie_link TEXT,
                 archive_chat_id VARCHAR(255),
@@ -484,11 +516,13 @@ async def _rebuild_sqlite_movies_table(conn) -> None:
     )
     await conn.execute(
         text(
-            """
+            f"""
             INSERT INTO movies_new (
                 id,
                 code,
                 title,
+                content_type,
+                episode,
                 description,
                 movie_link,
                 archive_chat_id,
@@ -500,19 +534,20 @@ async def _rebuild_sqlite_movies_table(conn) -> None:
                 id,
                 code,
                 title,
-                description,
-                movie_link,
-                archive_chat_id,
-                archive_message_id,
-                COALESCE(views_count, 0),
-                created_at
+                COALESCE({content_type_expr}, 'movie'),
+                {episode_expr},
+                {column_expr("description", "NULL")},
+                {column_expr("movie_link", "NULL")},
+                {archive_chat_expr},
+                {archive_message_expr},
+                COALESCE({views_expr}, 0),
+                COALESCE({created_at_expr}, CURRENT_TIMESTAMP)
             FROM movies
             """
         )
     )
     await conn.execute(text("DROP TABLE movies"))
     await conn.execute(text("ALTER TABLE movies_new RENAME TO movies"))
-    # Plain (non-unique) index — serials share the same code across episodes
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movies_code ON movies (code)"))
     logger.info("movies jadvali arxiv kanal sxemasiga o'tkazildi.")
 
@@ -584,13 +619,40 @@ async def _migrate_postgresql_movies_serial_support() -> None:
             )
             logger.info("PostgreSQL movies: added episode column")
 
-        # Drop unique constraints / indexes on code — try common auto-generated names
-        for constraint in ("movies_code_key", "uq_movies_code"):
-            await conn.execute(
-                text(
-                    f"ALTER TABLE movies DROP CONSTRAINT IF EXISTS {constraint}"
-                )
+        await conn.execute(
+            text(
+                """
+                DO $$
+                DECLARE
+                    unique_constraint_name text;
+                BEGIN
+                    FOR unique_constraint_name IN
+                        SELECT c.conname
+                        FROM pg_constraint c
+                        JOIN pg_class t ON t.oid = c.conrelid
+                        JOIN pg_namespace n ON n.oid = t.relnamespace
+                        WHERE t.relname = 'movies'
+                          AND n.nspname = current_schema()
+                          AND c.contype = 'u'
+                          AND c.conkey = ARRAY[
+                              (
+                                  SELECT a.attnum
+                                  FROM pg_attribute a
+                                  WHERE a.attrelid = t.oid
+                                    AND a.attname = 'code'
+                                    AND NOT a.attisdropped
+                              )
+                          ]::smallint[]
+                    LOOP
+                        EXECUTE format(
+                            'ALTER TABLE movies DROP CONSTRAINT %I',
+                            unique_constraint_name
+                        );
+                    END LOOP;
+                END $$
+                """
             )
+        )
         for idx in ("ix_movies_code", "uq_movies_code"):
             await conn.execute(text(f"DROP INDEX IF EXISTS {idx}"))
 

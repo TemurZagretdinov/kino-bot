@@ -14,6 +14,7 @@ from app.keyboards.admin_kb import (
     admin_main_keyboard,
     confirm_broadcast_keyboard,
     confirm_delete_movie_keyboard,
+    episode_keyboard,
 )
 from app.services.channel_service import (
     create_private_channel,
@@ -24,21 +25,22 @@ from app.services.channel_service import (
 )
 from app.services.movie_service import (
     create_movie,
-    create_serial_episode,
     delete_movie_by_code,
     get_movie_by_code,
     list_movies,
     normalize_code,
+    parse_telegram_link,
+    save_content,
 )
 from app.services.stats_service import get_stats
 from app.services.user_service import list_not_blocked_users, set_user_blocked
 from app.states.admin_states import (
     AddChannel,
     AddMovie,
-    AddSerial,
     Broadcast,
     DeleteChannel,
     DeleteMovie,
+    SerialAddStates,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,43 +212,36 @@ async def add_movie_archive_post_link(message: Message, state: FSMContext) -> No
 
 @router.message(AdminFilter(), StateFilter(None), F.text == ADD_SERIAL)
 async def add_serial_start(message: Message, state: FSMContext) -> None:
-    """Step 1: ask for serial title."""
-    await state.set_state(AddSerial.title)
+    await state.set_state(SerialAddStates.waiting_title)
     await message.answer("📺 Serial nomini yuboring.")
 
 
-@router.message(AdminFilter(), StateFilter(AddSerial.title), F.text)
+@router.message(AdminFilter(), StateFilter(SerialAddStates.waiting_title), F.text)
 async def add_serial_title(message: Message, state: FSMContext) -> None:
-    """Step 1 → 2: save title, ask for code."""
     title = _message_text(message)
     if not title:
         await message.answer("Serial nomi bo'sh bo'lmasin. Qayta yuboring.")
         return
 
-    await state.update_data(title=title, saved_episodes=[])
-    await state.set_state(AddSerial.code)
-    await message.answer(
-        "🔢 Serial kodini yuboring. Masalan: <code>BB01</code>\n"
-        "(Bu kod barcha qismlar uchun bir xil bo'ladi)"
-    )
+    await state.update_data(title=title, saved_count=0)
+    await state.set_state(SerialAddStates.waiting_code)
+    await message.answer("🔢 Serial kodini yuboring. Masalan: <code>BB01</code>")
 
 
-@router.message(AdminFilter(), StateFilter(AddSerial.code), F.text)
+@router.message(AdminFilter(), StateFilter(SerialAddStates.waiting_code), F.text)
 async def add_serial_code(message: Message, state: FSMContext) -> None:
-    """Step 2 → 3: save code, ask episode count."""
     code = normalize_code(_message_text(message))
     if not code:
         await message.answer("Serial kodi bo'sh bo'lmasin. Qayta yuboring.")
         return
 
     await state.update_data(code=code)
-    await state.set_state(AddSerial.episode_count)
-    await message.answer("🔢 Necha qismdan iborat? (raqam yuboring, masalan: <code>5</code>)")
+    await state.set_state(SerialAddStates.waiting_episode_count)
+    await message.answer("Necha qismdan iborat?")
 
 
-@router.message(AdminFilter(), StateFilter(AddSerial.episode_count), F.text)
+@router.message(AdminFilter(), StateFilter(SerialAddStates.waiting_episode_count), F.text)
 async def add_serial_episode_count(message: Message, state: FSMContext) -> None:
-    """Step 3 → 4: save total, ask first episode link."""
     text = _message_text(message)
     if not text.isdigit() or int(text) < 1:
         await message.answer("Musbat raqam yuboring. Masalan: <code>5</code>")
@@ -254,23 +249,23 @@ async def add_serial_episode_count(message: Message, state: FSMContext) -> None:
 
     total = int(text)
     await state.update_data(episode_count=total, current_episode=1)
-    await state.set_state(AddSerial.episode_link)
+    await state.set_state(SerialAddStates.waiting_episode_link)
     await message.answer(
-        f"🔗 <b>1-qism</b> arxiv kanal linkini yuboring:\n"
-        f"Masalan: <code>https://t.me/kino_arxiv/25</code>"
+        "📎 1-qism linkini yuboring:",
+        reply_markup=episode_keyboard(),
     )
 
 
-@router.message(AdminFilter(), StateFilter(AddSerial.episode_link), F.text)
+@router.message(AdminFilter(), StateFilter(SerialAddStates.waiting_episode_link), F.text)
 async def add_serial_episode_link(message: Message, state: FSMContext) -> None:
-    """
-    Step 4 (repeated): receive one episode link, save it, then either:
-    - Ask for the next episode link, or
-    - Finish when all episodes are saved.
-    """
     link = _message_text(message)
-    if not link:
-        await message.answer("Link bo'sh bo'lmasin. Qayta yuboring.")
+    parsed_link = parse_telegram_link(link)
+    if parsed_link is None:
+        await message.answer(
+            "❌ Noto'g'ri link!\n"
+            "To'g'ri format: https://t.me/kanal/123",
+            reply_markup=episode_keyboard(),
+        )
         return
 
     data = await state.get_data()
@@ -278,40 +273,78 @@ async def add_serial_episode_link(message: Message, state: FSMContext) -> None:
     code: str = data["code"]
     current_episode: int = data["current_episode"]
     episode_count: int = data["episode_count"]
-    saved_episodes: list[int] = data.get("saved_episodes", [])
+    saved_count: int = data.get("saved_count", 0)
+    channel_id, message_id = parsed_link
 
-    # Save this episode to DB
     try:
         async with AsyncSessionLocal() as session:
-            await create_serial_episode(
+            await save_content(
                 session=session,
-                title=title,
                 code=code,
+                title=title,
+                message_id=message_id,
+                channel_id=channel_id,
+                content_type="serial",
                 episode=current_episode,
-                archive_post_link=link,
             )
     except ValueError as exc:
-        await message.answer(f"❌ {escape(str(exc))}\nQayta yuboring.")
+        await message.answer(
+            f"❌ {escape(str(exc))}\nQayta yuboring.",
+            reply_markup=episode_keyboard(),
+        )
+        return
+    except Exception:
+        logger.exception("Serial qismi saqlanmadi code=%s episode=%s", code, current_episode)
+        await message.answer(
+            "❌ Qismni saqlashda xatolik yuz berdi. Qayta urinib ko'ring.",
+            reply_markup=episode_keyboard(),
+        )
         return
 
-    saved_episodes.append(current_episode)
+    saved_count += 1
     next_episode = current_episode + 1
 
     if next_episode > episode_count:
-        # All episodes saved — done
         await state.clear()
         await message.answer(
-            f"✅ Serial qo'shildi: <b>{escape(title)}</b> — {episode_count} qism\n"
-            f"🔢 Kod: <code>{escape(code)}</code>",
+            f"✅ Serial saqlandi!\n"
+            f"📺 {escape(title)}\n"
+            f"🎬 {saved_count} ta qism qo'shildi",
             reply_markup=admin_main_keyboard(),
         )
         return
 
-    # Ask for the next episode
-    await state.update_data(current_episode=next_episode, saved_episodes=saved_episodes)
+    await state.update_data(current_episode=next_episode, saved_count=saved_count)
     await message.answer(
-        f"✅ {current_episode}-qism saqlandi.\n\n"
-        f"🔗 <b>{next_episode}-qism</b> arxiv kanal linkini yuboring:"
+        f"📎 {next_episode}-qism linkini yuboring:",
+        reply_markup=episode_keyboard(),
+    )
+
+
+@router.callback_query(AdminFilter(), StateFilter(SerialAddStates.waiting_episode_link), F.data == "finish_serial")
+async def finish_serial_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    title = str(data.get("title", "")).strip()
+    saved_count = int(data.get("saved_count", 0) or 0)
+
+    await state.clear()
+    await callback.answer()
+
+    if callback.message is None:
+        return
+
+    if saved_count < 1:
+        await callback.message.answer(
+            "⚠️ Hech qism qo'shilmadi. Serial saqlanmadi.",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+
+    await callback.message.answer(
+        f"✅ Serial saqlandi!\n"
+        f"📺 {escape(title)}\n"
+        f"🎬 {saved_count} ta qism qo'shildi",
+        reply_markup=admin_main_keyboard(),
     )
 
 

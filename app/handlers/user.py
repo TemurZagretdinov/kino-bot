@@ -18,19 +18,16 @@ from app.keyboards.user_kb import (
     TOP_MOVIES,
     back_to_menu_keyboard,
     main_user_menu,
-    movies_inline_keyboard,
     subscribe_keyboard,
     top_movies_inline_keyboard,
 )
 from app.services.channel_service import get_active_channels
 from app.services.movie_service import (
     find_content,
-    format_movie_message,
     get_movie_by_id,
     get_top_movies,
     normalize_code,
     record_search,
-    search_movies_by_title,
 )
 from app.services.subscription import check_user_subscriptions
 from app.services.user_service import (
@@ -70,11 +67,6 @@ MENU_HINT_TEXT = "Kerakli bo'limni tanlang yoki kino kodini yuboring 🎬"
 NOT_FOUND_TEXT = (
     "❌ Kino yoki serial topilmadi!\n"
     "🔍 Kod yoki nom to'g'ri yozing"
-)
-
-NAME_NOT_FOUND_TEXT = (
-    "❌ Bu nom bo'yicha kino topilmadi.\n"
-    "Boshqa nom bilan urinib ko'ring."
 )
 
 HELP_TEXT = (
@@ -210,11 +202,11 @@ async def _deliver_content_result(
 
     # --- Serial delivery ---
     count = len(items)
-    await message.answer(f"🎬 <b>{escape(title)}</b> — {count} ta qism topildi")
+    await message.answer(f"📺 {escape(title)} — {count} ta qism topildi")
 
     for ep in items:
         if ep.archive_chat_id and ep.archive_message_id:
-            ep_label = f"📺 {ep.episode}-qism" if ep.episode else "📺 Qism"
+            ep_label = f"📎 {ep.episode}-qism" if ep.episode else "📎 Qism"
             ok = await _safe_copy_message(
                 bot,
                 chat_id=user_id,
@@ -361,6 +353,37 @@ async def _handle_code_request(
     await state.clear()
 
 
+async def _handle_content_request(
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+    query_text: str,
+    search_type: str,
+) -> None:
+    if message.from_user is None:
+        return
+
+    query = query_text.strip()
+    if not query:
+        await message.answer("Kino yoki serial nomini matn ko'rinishida yuboring.")
+        return
+
+    await _save_pending_movie_request(
+        state,
+        message.from_user,
+        movie_code=query,
+        movie_id=None,
+        search_type=search_type,
+    )
+
+    is_allowed = await _check_subscription_or_prompt(message, bot, message.from_user.id)
+    if not is_allowed:
+        return
+
+    await _send_movie_by_code(message, bot, message.from_user, query)
+    await state.clear()
+
+
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
@@ -456,42 +479,7 @@ async def waiting_for_name_handler(message: Message, bot: Bot, state: FSMContext
     if message.from_user is None or message.text is None:
         return
 
-    query = message.text.strip()
-    if not query:
-        await message.answer("Kino nomini matn ko'rinishida yuboring.")
-        return
-
-    await _upsert_if_possible(message.from_user)
-
-    async with AsyncSessionLocal() as session:
-        movies = await search_movies_by_title(session, query, limit=10)
-
-    if not movies:
-        await message.answer(NAME_NOT_FOUND_TEXT)
-        return
-
-    if len(movies) == 1:
-        movie = movies[0]
-        await _save_pending_movie_request(
-            state,
-            message.from_user,
-            movie_code=None,
-            movie_id=movie.id,
-            search_type="title",
-        )
-
-        is_allowed = await _check_subscription_or_prompt(message, bot, message.from_user.id)
-        if not is_allowed:
-            return
-
-        await _send_movie_by_id(message, bot, message.from_user, movie.id)
-        await state.clear()
-        return
-
-    await message.answer(
-        "🔎 <b>Qidiruv natijalari:</b>",
-        reply_markup=movies_inline_keyboard(movies),
-    )
+    await _handle_content_request(message, bot, state, message.text, search_type="title")
 
 
 @router.message(StateFilter(None), F.text)

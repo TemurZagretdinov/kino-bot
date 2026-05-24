@@ -15,7 +15,7 @@ If no episode number found     → saved as movie
 import logging
 import re
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.types import Message
 
 from app.config import settings
@@ -25,7 +25,6 @@ from app.services.movie_service import (
     create_serial_episode,
     get_all_by_code,
     normalize_code,
-    parse_archive_post_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,15 +37,11 @@ router = Router(name="channel_post")
 # Matches:  "Kod: BB01"  /  "#BB01"  /  "BB01" at word boundary
 _CODE_PATTERN = re.compile(
     r"(?:Kod\s*[:：]\s*|#)([A-Za-z0-9]{2,16})"
-    r"|^([A-Za-z]{1,4}\d{1,8})\b",
+    r"|(?:^|\b)([A-Za-z]{1,6}\d{1,8})\s*\|",
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Matches episode number: "2-qism", "qism 2", "qism2", "2 qism"
-_EPISODE_PATTERN = re.compile(
-    r"(\d+)\s*[-–]?\s*qism|qism\s*[-–]?\s*(\d+)",
-    re.IGNORECASE,
-)
+_EPISODE_PATTERN = re.compile(r"(\d+)[- ]?qism|qism[- ]?(\d+)", re.IGNORECASE)
 
 
 def _extract_code(text: str) -> str | None:
@@ -84,12 +79,15 @@ def _extract_title(text: str, code: str) -> str:
     return clean if clean else code
 
 
-def _build_archive_link(chat_id: int | str, message_id: int) -> str:
+def _build_archive_link(chat_id: int | str, message_id: int, username: str | None = None) -> str:
     """
     Build a t.me link the service can parse.
     Numeric IDs look like https://t.me/c/1234567890/42 (private channels).
     Username IDs look like https://t.me/username/42.
     """
+    if username:
+        return f"https://t.me/{username.lstrip('@')}/{message_id}"
+
     cid = str(chat_id)
     # Strip leading -100 prefix for private channel numeric IDs
     if cid.startswith("-100"):
@@ -143,7 +141,7 @@ async def handle_archive_channel_post(message: Message) -> None:
 
     episode = _extract_episode(raw_text)
     title = _extract_title(raw_text, code)
-    archive_link = _build_archive_link(chat_id, message.message_id)
+    archive_link = _build_archive_link(chat_id, message.message_id, message.chat.username)
 
     try:
         if episode is not None:

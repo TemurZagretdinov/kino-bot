@@ -47,3 +47,16 @@ def confirm_broadcast_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def episode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Tugallash",
+                    callback_data="finish_serial",
+                )
+            ]
+        ]
+    )
