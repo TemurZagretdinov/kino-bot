@@ -38,11 +38,14 @@ def create_bot() -> Bot:
 
 
 def create_dispatcher() -> Dispatcher:
-    from app.handlers import admin, user
+    from app.handlers import admin, channel_post, user
 
     dispatcher = Dispatcher(storage=MemoryStorage())
+    # Admin router first so admin filters take priority over user filters
     dispatcher.include_router(admin.router)
     dispatcher.include_router(user.router)
+    # Channel post router handles posts arriving in the archive channel
+    dispatcher.include_router(channel_post.router)
     return dispatcher
 
 

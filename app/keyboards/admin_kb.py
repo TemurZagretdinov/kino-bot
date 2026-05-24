@@ -4,10 +4,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Kino qo‘shish"), KeyboardButton(text="📋 Kinolar ro‘yxati")],
-            [KeyboardButton(text="🗑 Kino o‘chirish"), KeyboardButton(text="📢 Kanal qo‘shish")],
-            [KeyboardButton(text="📋 Kanallar ro‘yxati"), KeyboardButton(text="❌ Kanal o‘chirish")],
-            [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="📨 Reklama yuborish")],
+            [KeyboardButton(text="➕ Kino qo'shish"), KeyboardButton(text="📺 Serial qo'shish")],
+            [KeyboardButton(text="📋 Kinolar ro'yxati"), KeyboardButton(text="🗑 Kino o'chirish")],
+            [KeyboardButton(text="📢 Kanal qo'shish"), KeyboardButton(text="📋 Kanallar ro'yxati")],
+            [KeyboardButton(text="❌ Kanal o'chirish"), KeyboardButton(text="📊 Statistika")],
+            [KeyboardButton(text="📨 Reklama yuborish")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Admin bo'limini tanlang",
@@ -19,7 +20,7 @@ def confirm_delete_movie_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Ha, o‘chirish",
+                    text="Ha, o'chirish",
                     callback_data="confirm_delete_movie",
                 ),
                 InlineKeyboardButton(

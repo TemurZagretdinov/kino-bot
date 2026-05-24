@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     webhook_path: str = Field(default="/webhook", alias="WEBHOOK_PATH")
     webhook_secret: str = Field(default="change_me", alias="WEBHOOK_SECRET")
     port: int = Field(default=8000, alias="PORT")
+    archive_channel_ids: str = Field(default="", alias="ARCHIVE_CHANNEL_IDS")
 
     model_config = SettingsConfigDict(
         env_file=".env",

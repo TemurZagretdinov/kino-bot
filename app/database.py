@@ -41,6 +41,7 @@ async def init_db() -> None:
 
             await _migrate_channels_table()
             await _migrate_movies_table()
+            await _migrate_movies_serial_support()
             await _migrate_users_table()
         except RuntimeError:
             raise
@@ -184,6 +185,14 @@ async def _migrate_movies_table() -> None:
         await _migrate_sqlite_movies_table()
     elif engine.dialect.name == "postgresql":
         await _migrate_postgresql_movies_table()
+
+
+async def _migrate_movies_serial_support() -> None:
+    """Add content_type / episode columns and drop the UNIQUE constraint on code."""
+    if engine.dialect.name == "sqlite":
+        await _migrate_sqlite_movies_serial_support()
+    elif engine.dialect.name == "postgresql":
+        await _migrate_postgresql_movies_serial_support()
 
 
 async def _migrate_users_table() -> None:
@@ -503,8 +512,93 @@ async def _rebuild_sqlite_movies_table(conn) -> None:
     )
     await conn.execute(text("DROP TABLE movies"))
     await conn.execute(text("ALTER TABLE movies_new RENAME TO movies"))
-    await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_movies_code ON movies (code)"))
+    # Plain (non-unique) index — serials share the same code across episodes
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_movies_code ON movies (code)"))
     logger.info("movies jadvali arxiv kanal sxemasiga o'tkazildi.")
+
+
+async def _migrate_sqlite_movies_serial_support() -> None:
+    """SQLite: add content_type & episode columns; replace unique code index with plain index."""
+    async with engine.begin() as conn:
+        result = await conn.execute(text("PRAGMA table_info(movies)"))
+        rows = result.fetchall()
+        if not rows:
+            return
+
+        columns = {row[1] for row in rows}
+
+        # Add new columns if absent
+        if "content_type" not in columns:
+            await conn.execute(
+                text("ALTER TABLE movies ADD COLUMN content_type VARCHAR(16) NOT NULL DEFAULT 'movie'")
+            )
+            logger.info("SQLite movies: added content_type column")
+
+        if "episode" not in columns:
+            await conn.execute(
+                text("ALTER TABLE movies ADD COLUMN episode INTEGER")
+            )
+            logger.info("SQLite movies: added episode column")
+
+        # Drop any existing unique index on code; recreate as plain index
+        # SQLAlchemy may name it ix_movies_code or uq_movies_code depending on version
+        for idx_name in ("ix_movies_code", "uq_movies_code"):
+            await conn.execute(text(f"DROP INDEX IF EXISTS {idx_name}"))
+
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_movies_code ON movies (code)")
+        )
+        logger.info("SQLite movies: code index is now non-unique (serial support)")
+
+
+async def _migrate_postgresql_movies_serial_support() -> None:
+    """PostgreSQL: add content_type & episode columns; drop unique constraint on code."""
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'movies'
+                """
+            )
+        )
+        columns = {row[0] for row in result.fetchall()}
+        if not columns:
+            logger.warning("movies jadvali topilmadi, serial migratsiya o'tkazilmadi.")
+            return
+
+        if "content_type" not in columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE movies "
+                    "ADD COLUMN content_type VARCHAR(16) NOT NULL DEFAULT 'movie'"
+                )
+            )
+            logger.info("PostgreSQL movies: added content_type column")
+
+        if "episode" not in columns:
+            await conn.execute(
+                text("ALTER TABLE movies ADD COLUMN episode INTEGER")
+            )
+            logger.info("PostgreSQL movies: added episode column")
+
+        # Drop unique constraints / indexes on code — try common auto-generated names
+        for constraint in ("movies_code_key", "uq_movies_code"):
+            await conn.execute(
+                text(
+                    f"ALTER TABLE movies DROP CONSTRAINT IF EXISTS {constraint}"
+                )
+            )
+        for idx in ("ix_movies_code", "uq_movies_code"):
+            await conn.execute(text(f"DROP INDEX IF EXISTS {idx}"))
+
+        # Recreate as plain index
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_movies_code ON movies (code)")
+        )
+        logger.info("PostgreSQL movies: code index is now non-unique (serial support)")
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

@@ -24,6 +24,7 @@ from app.services.channel_service import (
 )
 from app.services.movie_service import (
     create_movie,
+    create_serial_episode,
     delete_movie_by_code,
     get_movie_by_code,
     list_movies,
@@ -31,17 +32,26 @@ from app.services.movie_service import (
 )
 from app.services.stats_service import get_stats
 from app.services.user_service import list_not_blocked_users, set_user_blocked
-from app.states.admin_states import AddChannel, AddMovie, Broadcast, DeleteChannel, DeleteMovie
+from app.states.admin_states import (
+    AddChannel,
+    AddMovie,
+    AddSerial,
+    Broadcast,
+    DeleteChannel,
+    DeleteMovie,
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
-ADD_MOVIE = "➕ Kino qo‘shish"
-LIST_MOVIES = "📋 Kinolar ro‘yxati"
-DELETE_MOVIE = "🗑 Kino o‘chirish"
-ADD_CHANNEL = "📢 Kanal qo‘shish"
-LIST_CHANNELS = "📋 Kanallar ro‘yxati"
-DELETE_CHANNEL = "❌ Kanal o‘chirish"
+# Button labels
+ADD_MOVIE = "➕ Kino qo'shish"
+ADD_SERIAL = "📺 Serial qo'shish"
+LIST_MOVIES = "📋 Kinolar ro'yxati"
+DELETE_MOVIE = "🗑 Kino o'chirish"
+ADD_CHANNEL = "📢 Kanal qo'shish"
+LIST_CHANNELS = "📋 Kanallar ro'yxati"
+DELETE_CHANNEL = "❌ Kanal o'chirish"
 STATS = "📊 Statistika"
 BROADCAST = "📨 Reklama yuborish"
 
@@ -53,12 +63,12 @@ ADD_CHANNEL_LINK_PROMPT = (
 
 PRIVATE_CHANNEL_FORWARD_PROMPT = (
     "Private kanalni tekshirish uchun shu kanaldan istalgan bitta postni menga forward qiling.\n"
-    "Eslatma: bot o‘sha kanalda admin bo‘lishi kerak."
+    "Eslatma: bot o'sha kanalda admin bo'lishi kerak."
 )
 
 PRIVATE_CHANNEL_FORWARD_ERROR = (
     "Bu xabardan kanalni aniqlay olmadim. Iltimos, private kanaldan oddiy postni "
-    "forward qiling yoki kanal sozlamalarida forward cheklovi yo‘qligini tekshiring."
+    "forward qiling yoki kanal sozlamalarida forward cheklovi yo'qligini tekshiring."
 )
 
 
@@ -85,14 +95,18 @@ def _channel_identifier(channel) -> str:
     return channel.username or ""
 
 
+# ---------------------------------------------------------------------------
+# Admin panel entry
+# ---------------------------------------------------------------------------
+
 @router.message(Command("admin"))
 async def admin_panel(message: Message) -> None:
     if not is_admin(message.from_user.id if message.from_user else None):
-        await message.answer("⛔ Sizda admin paneldan foydalanish huquqi yo‘q.")
+        await message.answer("⛔ Sizda admin paneldan foydalanish huquqi yo'q.")
         return
 
     await message.answer(
-        "👨‍💻 Admin panelga xush kelibsiz.\nKerakli bo‘limni tanlang.",
+        "👨‍💻 Admin panelga xush kelibsiz.\nKerakli bo'limni tanlang.",
         reply_markup=admin_main_keyboard(),
     )
 
@@ -102,6 +116,10 @@ async def cancel_admin_state(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Bekor qilindi.", reply_markup=admin_main_keyboard())
 
+
+# ---------------------------------------------------------------------------
+# Add Movie flow (unchanged logic)
+# ---------------------------------------------------------------------------
 
 @router.message(AdminFilter(), StateFilter(None), F.text == ADD_MOVIE)
 async def add_movie_start(message: Message, state: FSMContext) -> None:
@@ -113,7 +131,7 @@ async def add_movie_start(message: Message, state: FSMContext) -> None:
 async def add_movie_title(message: Message, state: FSMContext) -> None:
     title = _message_text(message)
     if not title:
-        await message.answer("Kino nomi bo‘sh bo‘lmasin. Qayta yuboring.")
+        await message.answer("Kino nomi bo'sh bo'lmasin. Qayta yuboring.")
         return
 
     await state.update_data(title=title)
@@ -125,19 +143,19 @@ async def add_movie_title(message: Message, state: FSMContext) -> None:
 async def add_movie_code(message: Message, state: FSMContext) -> None:
     code = normalize_code(_message_text(message))
     if not code:
-        await message.answer("Kino kodi bo‘sh bo‘lmasin. Qayta yuboring.")
+        await message.answer("Kino kodi bo'sh bo'lmasin. Qayta yuboring.")
         return
 
     async with AsyncSessionLocal() as session:
         exists = await get_movie_by_code(session, code)
 
     if exists:
-        await message.answer("❌ Bu kod oldin qo‘shilgan. Boshqa kod yuboring.")
+        await message.answer("❌ Bu kod oldin qo'shilgan. Boshqa kod yuboring.")
         return
 
     await state.update_data(code=code)
     await state.set_state(AddMovie.description)
-    await message.answer("📝 Kino tavsifini yuboring. Tavsif bo‘lmasa <code>-</code> yuboring.")
+    await message.answer("📝 Kino tavsifini yuboring. Tavsif bo'lmasa <code>-</code> yuboring.")
 
 
 @router.message(AdminFilter(), StateFilter(AddMovie.description), F.text)
@@ -158,7 +176,7 @@ async def add_movie_description(message: Message, state: FSMContext) -> None:
 async def add_movie_archive_post_link(message: Message, state: FSMContext) -> None:
     archive_post_link = _message_text(message)
     if not archive_post_link:
-        await message.answer("Arxiv post linki bo‘sh bo‘lmasin. Qayta yuboring.")
+        await message.answer("Arxiv post linki bo'sh bo'lmasin. Qayta yuboring.")
         return
 
     data = await state.get_data()
@@ -177,7 +195,7 @@ async def add_movie_archive_post_link(message: Message, state: FSMContext) -> No
 
     await state.clear()
     await message.answer(
-        f"✅ Kino qo‘shildi:\n"
+        f"✅ Kino qo'shildi:\n"
         f"🎥 <b>{escape(movie.title)}</b>\n"
         f"🔢 Kod: <code>{escape(movie.code)}</code>\n"
         f"📦 Arxiv: <code>{escape(movie.archive_chat_id or '')}</code> / "
@@ -186,29 +204,151 @@ async def add_movie_archive_post_link(message: Message, state: FSMContext) -> No
     )
 
 
+# ---------------------------------------------------------------------------
+# Add Serial flow
+# ---------------------------------------------------------------------------
+
+@router.message(AdminFilter(), StateFilter(None), F.text == ADD_SERIAL)
+async def add_serial_start(message: Message, state: FSMContext) -> None:
+    """Step 1: ask for serial title."""
+    await state.set_state(AddSerial.title)
+    await message.answer("📺 Serial nomini yuboring.")
+
+
+@router.message(AdminFilter(), StateFilter(AddSerial.title), F.text)
+async def add_serial_title(message: Message, state: FSMContext) -> None:
+    """Step 1 → 2: save title, ask for code."""
+    title = _message_text(message)
+    if not title:
+        await message.answer("Serial nomi bo'sh bo'lmasin. Qayta yuboring.")
+        return
+
+    await state.update_data(title=title, saved_episodes=[])
+    await state.set_state(AddSerial.code)
+    await message.answer(
+        "🔢 Serial kodini yuboring. Masalan: <code>BB01</code>\n"
+        "(Bu kod barcha qismlar uchun bir xil bo'ladi)"
+    )
+
+
+@router.message(AdminFilter(), StateFilter(AddSerial.code), F.text)
+async def add_serial_code(message: Message, state: FSMContext) -> None:
+    """Step 2 → 3: save code, ask episode count."""
+    code = normalize_code(_message_text(message))
+    if not code:
+        await message.answer("Serial kodi bo'sh bo'lmasin. Qayta yuboring.")
+        return
+
+    await state.update_data(code=code)
+    await state.set_state(AddSerial.episode_count)
+    await message.answer("🔢 Necha qismdan iborat? (raqam yuboring, masalan: <code>5</code>)")
+
+
+@router.message(AdminFilter(), StateFilter(AddSerial.episode_count), F.text)
+async def add_serial_episode_count(message: Message, state: FSMContext) -> None:
+    """Step 3 → 4: save total, ask first episode link."""
+    text = _message_text(message)
+    if not text.isdigit() or int(text) < 1:
+        await message.answer("Musbat raqam yuboring. Masalan: <code>5</code>")
+        return
+
+    total = int(text)
+    await state.update_data(episode_count=total, current_episode=1)
+    await state.set_state(AddSerial.episode_link)
+    await message.answer(
+        f"🔗 <b>1-qism</b> arxiv kanal linkini yuboring:\n"
+        f"Masalan: <code>https://t.me/kino_arxiv/25</code>"
+    )
+
+
+@router.message(AdminFilter(), StateFilter(AddSerial.episode_link), F.text)
+async def add_serial_episode_link(message: Message, state: FSMContext) -> None:
+    """
+    Step 4 (repeated): receive one episode link, save it, then either:
+    - Ask for the next episode link, or
+    - Finish when all episodes are saved.
+    """
+    link = _message_text(message)
+    if not link:
+        await message.answer("Link bo'sh bo'lmasin. Qayta yuboring.")
+        return
+
+    data = await state.get_data()
+    title: str = data["title"]
+    code: str = data["code"]
+    current_episode: int = data["current_episode"]
+    episode_count: int = data["episode_count"]
+    saved_episodes: list[int] = data.get("saved_episodes", [])
+
+    # Save this episode to DB
+    try:
+        async with AsyncSessionLocal() as session:
+            await create_serial_episode(
+                session=session,
+                title=title,
+                code=code,
+                episode=current_episode,
+                archive_post_link=link,
+            )
+    except ValueError as exc:
+        await message.answer(f"❌ {escape(str(exc))}\nQayta yuboring.")
+        return
+
+    saved_episodes.append(current_episode)
+    next_episode = current_episode + 1
+
+    if next_episode > episode_count:
+        # All episodes saved — done
+        await state.clear()
+        await message.answer(
+            f"✅ Serial qo'shildi: <b>{escape(title)}</b> — {episode_count} qism\n"
+            f"🔢 Kod: <code>{escape(code)}</code>",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+
+    # Ask for the next episode
+    await state.update_data(current_episode=next_episode, saved_episodes=saved_episodes)
+    await message.answer(
+        f"✅ {current_episode}-qism saqlandi.\n\n"
+        f"🔗 <b>{next_episode}-qism</b> arxiv kanal linkini yuboring:"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Movies list
+# ---------------------------------------------------------------------------
+
 @router.message(AdminFilter(), StateFilter(None), F.text == LIST_MOVIES)
 async def movies_list(message: Message) -> None:
     async with AsyncSessionLocal() as session:
         movies = await list_movies(session)
 
     if not movies:
-        await message.answer("📋 Hozircha kinolar qo‘shilmagan.")
+        await message.answer("📋 Hozircha kinolar qo'shilmagan.")
         return
 
-    lines = ["📋 <b>Kinolar ro‘yxati</b>\n"]
+    lines = ["📋 <b>Kinolar ro'yxati</b>\n"]
     for movie in movies:
+        icon = "📺" if movie.content_type == "serial" else "🎬"
+        ep_suffix = f" ({movie.episode}-qism)" if movie.episode else ""
         lines.append(
-            f"• <code>{escape(movie.code)}</code> — {escape(movie.title)} "
-            f"({movie.views_count} ko‘rish)"
+            f"• {icon} <code>{escape(movie.code)}</code> — "
+            f"{escape(movie.title)}{ep_suffix} "
+            f"({movie.views_count} ko'rish)"
         )
 
     await message.answer("\n".join(lines))
 
 
+# ---------------------------------------------------------------------------
+# Delete Movie
+# ---------------------------------------------------------------------------
+
 @router.message(AdminFilter(), StateFilter(None), F.text == DELETE_MOVIE)
 async def delete_movie_start(message: Message, state: FSMContext) -> None:
     await state.set_state(DeleteMovie.code)
-    await message.answer("🗑 O‘chirmoqchi bo‘lgan kino kodini yuboring.")
+    await message.answer("🗑 O'chirmoqchi bo'lgan kino/serial kodini yuboring.")
 
 
 @router.message(AdminFilter(), StateFilter(DeleteMovie.code), F.text)
@@ -220,14 +360,16 @@ async def delete_movie_code(message: Message, state: FSMContext) -> None:
     if movie is None:
         await state.clear()
         await message.answer(
-            "❌ Bu kod bo‘yicha kino topilmadi.",
+            "❌ Bu kod bo'yicha kino topilmadi.",
             reply_markup=admin_main_keyboard(),
         )
         return
 
     await state.update_data(code=code)
+    icon = "📺" if movie.content_type == "serial" else "🎬"
     await message.answer(
-        f"⚠️ <b>{escape(movie.title)}</b> kinoni o‘chirishni tasdiqlaysizmi?",
+        f"⚠️ {icon} <b>{escape(movie.title)}</b> ni o'chirishni tasdiqlaysizmi?\n"
+        f"(Barcha qismlar o'chiriladi)",
         reply_markup=confirm_delete_movie_keyboard(),
     )
 
@@ -237,7 +379,7 @@ async def confirm_delete_movie(callback: CallbackQuery, state: FSMContext) -> No
     data = await state.get_data()
     code = data.get("code")
     if not code:
-        await callback.answer("O‘chirish kodi topilmadi.", show_alert=True)
+        await callback.answer("O'chirish kodi topilmadi.", show_alert=True)
         return
 
     async with AsyncSessionLocal() as session:
@@ -246,9 +388,9 @@ async def confirm_delete_movie(callback: CallbackQuery, state: FSMContext) -> No
     await state.clear()
     if callback.message:
         if deleted:
-            await callback.message.edit_text(f"✅ <code>{escape(code)}</code> kodli kino o‘chirildi.")
+            await callback.message.edit_text(f"✅ <code>{escape(code)}</code> kodli kontent o'chirildi.")
         else:
-            await callback.message.edit_text("❌ Kino topilmadi yoki allaqachon o‘chirilgan.")
+            await callback.message.edit_text("❌ Kino topilmadi yoki allaqachon o'chirilgan.")
     await callback.answer()
 
 
@@ -256,9 +398,13 @@ async def confirm_delete_movie(callback: CallbackQuery, state: FSMContext) -> No
 async def cancel_delete_movie(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     if callback.message:
-        await callback.message.edit_text("O‘chirish bekor qilindi.")
+        await callback.message.edit_text("O'chirish bekor qilindi.")
     await callback.answer()
 
+
+# ---------------------------------------------------------------------------
+# Channel management (unchanged)
+# ---------------------------------------------------------------------------
 
 @router.message(AdminFilter(), StateFilter(None), F.text == ADD_CHANNEL)
 async def add_channel_start(message: Message, state: FSMContext) -> None:
@@ -299,7 +445,7 @@ async def add_channel_link(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer(
-        f"✅ Kanal qo‘shildi:\n"
+        f"✅ Kanal qo'shildi:\n"
         f"📢 <b>{escape(channel.title)}</b>\n"
         f"Turi: <b>{_channel_kind(channel)}</b>\n"
         f"Username: <code>{escape(channel.username or '')}</code>\n"
@@ -310,7 +456,7 @@ async def add_channel_link(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminFilter(), StateFilter(AddChannel.link))
 async def add_channel_link_invalid(message: Message) -> None:
-    await message.answer(f"Kanal linkini matn ko‘rinishida yuboring.\n\n{ADD_CHANNEL_LINK_PROMPT}")
+    await message.answer(f"Kanal linkini matn ko'rinishida yuboring.\n\n{ADD_CHANNEL_LINK_PROMPT}")
 
 
 @router.message(AdminFilter(), StateFilter(AddChannel.forward_post))
@@ -327,7 +473,7 @@ async def add_private_channel_forward(message: Message, state: FSMContext) -> No
     if not invite_link:
         await state.clear()
         await message.answer(
-            "Private kanal linki topilmadi. Kanal qo‘shishni qaytadan boshlang.",
+            "Private kanal linki topilmadi. Kanal qo'shishni qaytadan boshlang.",
             reply_markup=admin_main_keyboard(),
         )
         return
@@ -346,7 +492,7 @@ async def add_private_channel_forward(message: Message, state: FSMContext) -> No
 
     await state.clear()
     await message.answer(
-        f"✅ Kanal qo‘shildi:\n"
+        f"✅ Kanal qo'shildi:\n"
         f"📢 <b>{escape(channel.title)}</b>\n"
         f"Turi: <b>{_channel_kind(channel)}</b>\n"
         f"Chat ID: <code>{escape(str(channel.chat_id or ''))}</code>\n"
@@ -361,13 +507,13 @@ async def channels_list(message: Message) -> None:
         channels = await list_channels(session)
 
     if not channels:
-        await message.answer("📋 Hozircha kanallar qo‘shilmagan.")
+        await message.answer("📋 Hozircha kanallar qo'shilmagan.")
         return
 
-    active_channels = [channel for channel in channels if channel.is_active]
-    inactive_channels = [channel for channel in channels if not channel.is_active]
+    active_channels = [c for c in channels if c.is_active]
+    inactive_channels = [c for c in channels if not c.is_active]
 
-    lines = ["📋 <b>Kanallar ro‘yxati</b>"]
+    lines = ["📋 <b>Kanallar ro'yxati</b>"]
     if active_channels:
         lines.append("\n✅ <b>Active kanallar</b>")
     for channel in active_channels:
@@ -405,10 +551,7 @@ async def delete_channel_username(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     if channel is None:
-        await message.answer(
-            "❌ Bunday kanal topilmadi.",
-            reply_markup=admin_main_keyboard(),
-        )
+        await message.answer("❌ Bunday kanal topilmadi.", reply_markup=admin_main_keyboard())
         return
 
     await message.answer(
@@ -416,6 +559,10 @@ async def delete_channel_username(message: Message, state: FSMContext) -> None:
         reply_markup=admin_main_keyboard(),
     )
 
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
 
 @router.message(AdminFilter(), StateFilter(None), F.text == STATS)
 async def stats_handler(message: Message) -> None:
@@ -425,12 +572,12 @@ async def stats_handler(message: Message) -> None:
     top_movies = stats["top_movies"]
     if top_movies:
         top_lines = [
-            f"{index}. {escape(movie.title)} — {movie.views_count}"
-            for index, movie in enumerate(top_movies, start=1)
+            f"{i}. {escape(m.title)} — {m.views_count}"
+            for i, m in enumerate(top_movies, start=1)
         ]
         top_text = "\n".join(top_lines)
     else:
-        top_text = "Hali ko‘rishlar yo‘q."
+        top_text = "Hali ko'rishlar yo'q."
 
     await message.answer(
         "📊 <b>Statistika</b>\n\n"
@@ -439,9 +586,13 @@ async def stats_handler(message: Message) -> None:
         f"🎥 Jami kinolar: <b>{stats['total_movies']}</b>\n"
         f"🔎 Jami qidiruvlar: <b>{stats['total_searches']}</b>\n"
         f"📢 Aktiv kanallar: <b>{stats['active_channels']}</b>\n\n"
-        f"🏆 <b>Eng ko‘p ko‘rilgan kinolar</b>\n{top_text}"
+        f"🏆 <b>Eng ko'p ko'rilgan kinolar</b>\n{top_text}"
     )
 
+
+# ---------------------------------------------------------------------------
+# Broadcast
+# ---------------------------------------------------------------------------
 
 @router.message(AdminFilter(), StateFilter(None), F.text == BROADCAST)
 async def broadcast_start(message: Message, state: FSMContext) -> None:
@@ -453,7 +604,7 @@ async def broadcast_start(message: Message, state: FSMContext) -> None:
 async def broadcast_text(message: Message, state: FSMContext) -> None:
     text = _message_text(message)
     if not text:
-        await message.answer("Reklama matni bo‘sh bo‘lmasin. Qayta yuboring.")
+        await message.answer("Reklama matni bo'sh bo'lmasin. Qayta yuboring.")
         return
 
     await state.update_data(text=text)

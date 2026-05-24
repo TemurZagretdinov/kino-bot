@@ -57,7 +57,7 @@ def movies_inline_keyboard(movies: Sequence[Movie]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"🎬 {_trim_button_text(movie.title)}",
+                text=f"{_content_icon(movie)} {_trim_button_text(movie.title)}",
                 callback_data=f"movie_by_id:{movie.id}",
             )
         ]
@@ -71,7 +71,7 @@ def top_movies_inline_keyboard(movies: Sequence[Movie]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{index}. 🎬 {_trim_button_text(movie.title)}",
+                text=f"{index}. {_content_icon(movie)} {_trim_button_text(movie.title)}",
                 callback_data=f"movie_by_id:{movie.id}",
             )
         ]
@@ -92,6 +92,11 @@ def _back_row() -> list[InlineKeyboardButton]:
             callback_data="back_to_menu",
         )
     ]
+
+
+def _content_icon(movie: Movie) -> str:
+    """Return 📺 for serials, 🎬 for movies."""
+    return "📺" if getattr(movie, "content_type", "movie") == "serial" else "🎬"
 
 
 def _trim_button_text(text: str, max_length: int = 48) -> str:

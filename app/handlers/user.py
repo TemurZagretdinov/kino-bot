@@ -1,9 +1,10 @@
+import asyncio
 import logging
 from html import escape
 from time import perf_counter
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, User as TelegramUser
@@ -23,8 +24,8 @@ from app.keyboards.user_kb import (
 )
 from app.services.channel_service import get_active_channels
 from app.services.movie_service import (
+    find_content,
     format_movie_message,
-    get_movie_by_code,
     get_movie_by_id,
     get_top_movies,
     normalize_code,
@@ -47,12 +48,12 @@ WELCOME_TEXT = (
     "Assalomu alaykum! 🎬\n\n"
     "KinoTekaUz botiga xush kelibsiz.\n"
     "Bu yerda siz kinolarni kod orqali yoki nomi orqali topishingiz mumkin.\n\n"
-    "Kerakli bo‘limni tanlang 👇"
+    "Kerakli bo'limni tanlang 👇"
 )
 
 SUBSCRIBE_TEXT = (
-    "📢 Kinolarni olish uchun quyidagi kanallarga obuna bo‘ling.\n\n"
-    "Obuna bo‘lgach, ✅ Tekshirish tugmasini bosing."
+    "📢 Kinolarni olish uchun quyidagi kanallarga obuna bo'ling.\n\n"
+    "Obuna bo'lgach, ✅ Tekshirish tugmasini bosing."
 )
 
 SUBSCRIPTION_CHECK_ERROR_TEXT = (
@@ -60,36 +61,39 @@ SUBSCRIPTION_CHECK_ERROR_TEXT = (
 )
 
 MOVIE_SEND_ERROR_TEXT = "❌ Kinoni yuborishda muammo yuz berdi. Administratorga murojaat qiling."
-MOVIE_LINK_FALLBACK_TEXT = "Agar video ochilmasa, quyidagi link orqali ko‘ring:"
+MOVIE_LINK_FALLBACK_TEXT = "Agar video ochilmasa, quyidagi link orqali ko'ring:"
 
-CODE_PROMPT_TEXT = "🎬 Kino kodini yuboring.\nMasalan: 1024"
-NAME_PROMPT_TEXT = "🔎 Kino nomini yuboring.\nMasalan: Avatar, Venom, Interstellar"
-MENU_HINT_TEXT = "Kerakli bo‘limni tanlang yoki kino kodini yuboring 🎬"
+CODE_PROMPT_TEXT = "🎬 Kino yoki serial kodini yuboring.\nMasalan: 1024"
+NAME_PROMPT_TEXT = "🔎 Kino yoki serial nomini yuboring.\nMasalan: Avatar, Venom, Interstellar"
+MENU_HINT_TEXT = "Kerakli bo'limni tanlang yoki kino kodini yuboring 🎬"
 
-CODE_NOT_FOUND_TEXT = (
-    "❌ Bu kod bo‘yicha kino topilmadi.\n"
-    "Iltimos, kodni tekshirib qayta yuboring."
+NOT_FOUND_TEXT = (
+    "❌ Kino yoki serial topilmadi!\n"
+    "🔍 Kod yoki nom to'g'ri yozing"
 )
 
 NAME_NOT_FOUND_TEXT = (
-    "❌ Bu nom bo‘yicha kino topilmadi.\n"
-    "Boshqa nom bilan urinib ko‘ring."
+    "❌ Bu nom bo'yicha kino topilmadi.\n"
+    "Boshqa nom bilan urinib ko'ring."
 )
 
 HELP_TEXT = (
     "ℹ️ <b>Botdan foydalanish:</b>\n\n"
     "🎬 <b>Kod bilan izlash</b> — Instagram yoki kanaldagi kino kodini yuboring.\n"
     "🔎 <b>Nom bilan izlash</b> — kino nomi orqali qidiring.\n"
-    "🔥 <b>Top filmlar</b> — eng ko‘p ko‘rilgan kinolar.\n"
+    "🔥 <b>Top filmlar</b> — eng ko'p ko'rilgan kinolar.\n"
     "📢 <b>Kanallar</b> — majburiy obuna kanallari.\n\n"
-    "Kino chiqishi uchun kerakli kanallarga obuna bo‘lish talab qilinadi."
+    "Kino chiqishi uchun kerakli kanallarga obuna bo'lish talab qilinadi."
 )
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 async def _upsert_if_possible(tg_user: TelegramUser | None) -> None:
     if tg_user is None:
         return
-
     async with AsyncSessionLocal() as session:
         await upsert_user(session, tg_user)
 
@@ -124,10 +128,7 @@ async def _check_subscription_or_prompt(
     bot: Bot,
     user_id: int,
 ) -> bool:
-    subscription_result = await check_user_subscriptions(
-        bot,
-        user_id,
-    )
+    subscription_result = await check_user_subscriptions(bot, user_id)
 
     if subscription_result.has_check_error:
         await message.answer(subscription_result.user_error_text or SUBSCRIPTION_CHECK_ERROR_TEXT)
@@ -143,84 +144,120 @@ async def _check_subscription_or_prompt(
     return True
 
 
-async def _send_movie_by_code(
+# ---------------------------------------------------------------------------
+# Content delivery
+# ---------------------------------------------------------------------------
+
+async def _safe_copy_message(
+    bot: Bot,
+    chat_id: int,
+    from_chat_id: str,
+    message_id: int,
+    **kwargs,
+) -> bool:
+    """Send copy_message and return True on success, False on Telegram error."""
+    try:
+        await bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            **kwargs,
+        )
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        logger.warning(
+            "copy_message failed chat_id=%s from_chat_id=%s message_id=%s error=%s",
+            chat_id,
+            from_chat_id,
+            message_id,
+            exc,
+        )
+        return False
+    except Exception:
+        logger.exception(
+            "Unexpected error in copy_message chat_id=%s from_chat_id=%s message_id=%s",
+            chat_id,
+            from_chat_id,
+            message_id,
+        )
+        return False
+
+
+async def _deliver_content_result(
     message: Message,
     bot: Bot,
-    tg_user: TelegramUser,
-    code: str,
+    user_id: int,
+    result: dict,
 ) -> None:
-    async with AsyncSessionLocal() as session:
-        user = await upsert_user(session, tg_user)
-        movie = await get_movie_by_code(session, code)
-        await record_search(session, user, code, movie)
+    """
+    Route a ContentResult to the correct delivery method:
+      - movie   → single copy_message
+      - serial  → header message + one copy_message per episode (0.3 s delay)
+      - not_found → error message
+    """
+    content_type = result["type"]
+    title = result["title"]
+    items: list = result["items"]
 
-    if movie is None:
-        await message.answer(
-            f"{CODE_NOT_FOUND_TEXT}\n\n{MENU_HINT_TEXT}",
-            reply_markup=main_user_menu(),
-        )
+    if content_type == "not_found" or not items:
+        await message.answer(NOT_FOUND_TEXT, reply_markup=main_user_menu())
         return
 
-    await _deliver_movie(message, bot, tg_user.id, movie)
-
-
-async def _send_movie_by_id(
-    message: Message,
-    bot: Bot,
-    tg_user: TelegramUser,
-    movie_id: int,
-) -> None:
-    async with AsyncSessionLocal() as session:
-        user = await upsert_user(session, tg_user)
-        movie = await get_movie_by_id(session, movie_id)
-        if movie is not None:
-            await record_search(session, user, movie.code, movie)
-
-    if movie is None:
-        await message.answer(
-            "❌ Kino topilmadi yoki o‘chirib yuborilgan.",
-            reply_markup=main_user_menu(),
-        )
+    if content_type == "movie":
+        movie = items[0]
+        await _deliver_single_movie(message, bot, user_id, movie)
         return
 
-    await _deliver_movie(message, bot, tg_user.id, movie)
+    # --- Serial delivery ---
+    count = len(items)
+    await message.answer(f"🎬 <b>{escape(title)}</b> — {count} ta qism topildi")
+
+    for ep in items:
+        if ep.archive_chat_id and ep.archive_message_id:
+            ep_label = f"📺 {ep.episode}-qism" if ep.episode else "📺 Qism"
+            ok = await _safe_copy_message(
+                bot,
+                chat_id=user_id,
+                from_chat_id=ep.archive_chat_id,
+                message_id=ep.archive_message_id,
+                caption=ep_label,
+            )
+            if not ok:
+                await message.answer(
+                    f"❌ {ep_label} yuborishda xatolik yuz berdi.",
+                    reply_markup=back_to_menu_keyboard(),
+                )
+        await asyncio.sleep(0.3)
+
+    # Final back-to-menu button after all episodes
+    await message.answer("✅ Barcha qismlar yuborildi.", reply_markup=back_to_menu_keyboard())
 
 
-async def _deliver_movie(message: Message, bot: Bot, user_id: int, movie) -> None:
+async def _deliver_single_movie(message: Message, bot: Bot, user_id: int, movie) -> None:
+    """Deliver a single movie row via copy_message with fallback to link."""
     started_at = perf_counter()
     copy_sent = False
     fallback_sent = False
     status = "unknown"
 
-    def _log_movie_send() -> None:
+    def _log() -> None:
         logger.info(
-            "Movie send took %.2f ms user_id=%s movie_id=%s status=%s copy_sent=%s fallback_sent=%s",
+            "Movie send took %.2f ms user_id=%s movie_id=%s status=%s",
             (perf_counter() - started_at) * 1000,
             user_id,
             getattr(movie, "id", None),
             status,
-            copy_sent,
-            fallback_sent,
         )
 
     if movie.archive_chat_id and movie.archive_message_id:
-        try:
-            await bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=movie.archive_chat_id,
-                message_id=movie.archive_message_id,
-                reply_markup=back_to_menu_keyboard(),
-            )
-            copy_sent = True
-            status = "copy_message"
-        except Exception:
-            logger.exception(
-                "Archive copy error: bot arxiv kanalga qo‘shilmagan yoki post topilmadi. "
-                "movie_id=%s archive_chat_id=%s archive_message_id=%s",
-                movie.id,
-                movie.archive_chat_id,
-                movie.archive_message_id,
-            )
+        copy_sent = await _safe_copy_message(
+            bot,
+            chat_id=user_id,
+            from_chat_id=movie.archive_chat_id,
+            message_id=movie.archive_message_id,
+            reply_markup=back_to_menu_keyboard(),
+        )
+        status = "copy_message" if copy_sent else "copy_failed"
 
     if movie.movie_link:
         fallback_sent = True
@@ -231,23 +268,63 @@ async def _deliver_movie(message: Message, bot: Bot, user_id: int, movie) -> Non
             reply_markup=back_to_menu_keyboard(),
             disable_web_page_preview=copy_sent,
         )
-        _log_movie_send()
+        _log()
         return
 
     if copy_sent:
-        _log_movie_send()
+        _log()
         return
 
     status = "error"
     logger.error(
-        "Archive copy error: movie archive fields and fallback link are empty. movie_id=%s",
-        movie.id,
+        "Movie archive fields and fallback link are empty. movie_id=%s", movie.id
     )
-    await message.answer(
-        MOVIE_SEND_ERROR_TEXT,
-        reply_markup=back_to_menu_keyboard(),
-    )
-    _log_movie_send()
+    await message.answer(MOVIE_SEND_ERROR_TEXT, reply_markup=back_to_menu_keyboard())
+    _log()
+
+
+# ---------------------------------------------------------------------------
+# Legacy single-movie helpers (keep for subscription-retry flow / callbacks)
+# ---------------------------------------------------------------------------
+
+async def _send_movie_by_code(
+    message: Message,
+    bot: Bot,
+    tg_user: TelegramUser,
+    code: str,
+) -> None:
+    """Find content by code and deliver (movie or serial)."""
+    async with AsyncSessionLocal() as session:
+        user = await upsert_user(session, tg_user)
+        result = await find_content(session, code)
+        # Record search against first item for stats
+        first = result["items"][0] if result["items"] else None
+        await record_search(session, user, code, first)
+
+    await _deliver_content_result(message, bot, tg_user.id, result)
+
+
+async def _send_movie_by_id(
+    message: Message,
+    bot: Bot,
+    tg_user: TelegramUser,
+    movie_id: int,
+) -> None:
+    """Deliver a single movie row by DB id (used from inline keyboard callbacks)."""
+    async with AsyncSessionLocal() as session:
+        user = await upsert_user(session, tg_user)
+        movie = await get_movie_by_id(session, movie_id)
+        if movie is not None:
+            await record_search(session, user, movie.code, movie)
+
+    if movie is None:
+        await message.answer(
+            "❌ Kino topilmadi yoki o'chirib yuborilgan.",
+            reply_markup=main_user_menu(),
+        )
+        return
+
+    await _deliver_single_movie(message, bot, tg_user.id, movie)
 
 
 async def _handle_code_request(
@@ -262,7 +339,7 @@ async def _handle_code_request(
 
     code = normalize_code(code_text)
     if not code:
-        await message.answer("Kino kodini matn ko‘rinishida yuboring.")
+        await message.answer("Kino kodini matn ko'rinishida yuboring.")
         return
     if len(code) > 64:
         await message.answer("Kino kodi 64 belgidan oshmasligi kerak.")
@@ -284,6 +361,10 @@ async def _handle_code_request(
     await state.clear()
 
 
+# ---------------------------------------------------------------------------
+# Route handlers
+# ---------------------------------------------------------------------------
+
 @router.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -295,11 +376,7 @@ async def start_handler(message: Message, state: FSMContext) -> None:
 async def search_by_code_start(message: Message, state: FSMContext) -> None:
     await _upsert_if_possible(message.from_user)
     await state.set_state(UserSearch.waiting_for_movie_code)
-    await state.update_data(
-        last_movie_code=None,
-        last_movie_id=None,
-        last_search_type="code",
-    )
+    await state.update_data(last_movie_code=None, last_movie_id=None, last_search_type="code")
     await message.answer(CODE_PROMPT_TEXT, reply_markup=main_user_menu())
 
 
@@ -307,11 +384,7 @@ async def search_by_code_start(message: Message, state: FSMContext) -> None:
 async def search_by_name_start(message: Message, state: FSMContext) -> None:
     await _upsert_if_possible(message.from_user)
     await state.set_state(UserSearch.waiting_for_movie_name)
-    await state.update_data(
-        last_movie_code=None,
-        last_movie_id=None,
-        last_search_type="title",
-    )
+    await state.update_data(last_movie_code=None, last_movie_id=None, last_search_type="title")
     await message.answer(NAME_PROMPT_TEXT, reply_markup=main_user_menu())
 
 
@@ -325,14 +398,15 @@ async def top_movies_handler(message: Message, state: FSMContext) -> None:
 
     if not movies:
         await message.answer(
-            "🔥 Hozircha top filmlar ro‘yxati bo‘sh.",
+            "🔥 Hozircha top filmlar ro'yxati bo'sh.",
             reply_markup=main_user_menu(),
         )
         return
 
     lines = ["🔥 <b>Top filmlar:</b>\n"]
     for index, movie in enumerate(movies, start=1):
-        lines.append(f"{index}. {escape(movie.title)} — {movie.views_count} ko‘rish")
+        icon = "📺" if (movie.content_type == "serial") else "🎬"
+        lines.append(f"{index}. {icon} {escape(movie.title)} — {movie.views_count} ko'rish")
     lines.append("\nQuyidagilardan birini tanlang 👇")
 
     await message.answer(
@@ -354,16 +428,13 @@ async def channels_handler(message: Message, state: FSMContext) -> None:
 
     if not channels:
         await message.answer(
-            "✅ Hozircha majburiy kanallar yo‘q.\n"
+            "✅ Hozircha majburiy kanallar yo'q.\n"
             "Endi kino kodini yoki nomini yuborishingiz mumkin.",
             reply_markup=main_user_menu(),
         )
         return
 
-    await message.answer(
-        SUBSCRIBE_TEXT,
-        reply_markup=subscribe_keyboard(channels),
-    )
+    await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard(channels))
 
 
 @router.message(F.text == HELP)
@@ -374,29 +445,20 @@ async def help_handler(message: Message, state: FSMContext) -> None:
 
 
 @router.message(StateFilter(UserSearch.waiting_for_movie_code), F.text)
-async def waiting_for_code_handler(
-    message: Message,
-    bot: Bot,
-    state: FSMContext,
-) -> None:
+async def waiting_for_code_handler(message: Message, bot: Bot, state: FSMContext) -> None:
     if message.text is None:
         return
-
     await _handle_code_request(message, bot, state, message.text)
 
 
 @router.message(StateFilter(UserSearch.waiting_for_movie_name), F.text)
-async def waiting_for_name_handler(
-    message: Message,
-    bot: Bot,
-    state: FSMContext,
-) -> None:
+async def waiting_for_name_handler(message: Message, bot: Bot, state: FSMContext) -> None:
     if message.from_user is None or message.text is None:
         return
 
     query = message.text.strip()
     if not query:
-        await message.answer("Kino nomini matn ko‘rinishida yuboring.")
+        await message.answer("Kino nomini matn ko'rinishida yuboring.")
         return
 
     await _upsert_if_possible(message.from_user)
@@ -442,14 +504,12 @@ async def unknown_text_handler(message: Message, bot: Bot, state: FSMContext) ->
         await message.answer(MENU_HINT_TEXT, reply_markup=main_user_menu())
         return
 
-    await _handle_code_request(
-        message,
-        bot,
-        state,
-        code,
-        search_type="code_auto",
-    )
+    await _handle_code_request(message, bot, state, code, search_type="code_auto")
 
+
+# ---------------------------------------------------------------------------
+# Callback handlers
+# ---------------------------------------------------------------------------
 
 @router.callback_query(F.data.startswith("movie_by_id:"))
 async def movie_by_id_callback(
@@ -465,7 +525,7 @@ async def movie_by_id_callback(
     try:
         movie_id = int(data.split(":", 1)[1])
     except (IndexError, ValueError):
-        await callback.answer("Kino ma’lumoti noto‘g‘ri.", show_alert=True)
+        await callback.answer("Kino ma'lumoti noto'g'ri.", show_alert=True)
         return
 
     await _save_pending_movie_request(
@@ -481,9 +541,7 @@ async def movie_by_id_callback(
         return
 
     is_allowed = await _check_subscription_or_prompt(
-        callback.message,
-        bot,
-        callback.from_user.id,
+        callback.message, bot, callback.from_user.id
     )
     if not is_allowed:
         await callback.answer()
@@ -505,10 +563,7 @@ async def check_subscription_handler(
         await callback.answer()
         return
 
-    subscription_result = await check_user_subscriptions(
-        bot,
-        callback.from_user.id,
-    )
+    subscription_result = await check_user_subscriptions(bot, callback.from_user.id)
 
     if subscription_result.has_check_error:
         error_text = subscription_result.user_error_text or SUBSCRIPTION_CHECK_ERROR_TEXT
@@ -524,7 +579,7 @@ async def check_subscription_handler(
                 SUBSCRIBE_TEXT,
                 subscribe_keyboard(subscription_result.missing_channels),
             )
-        await callback.answer("Hali barcha kanallarga obuna bo‘lmadingiz.", show_alert=True)
+        await callback.answer("Hali barcha kanallarga obuna bo'lmadingiz.", show_alert=True)
         return
 
     data = await state.get_data()
@@ -549,12 +604,14 @@ async def check_subscription_handler(
             return
 
         if last_movie_code:
-            await _send_movie_by_code(callback.message, bot, callback.from_user, str(last_movie_code))
+            await _send_movie_by_code(
+                callback.message, bot, callback.from_user, str(last_movie_code)
+            )
             await state.clear()
             return
 
         await callback.message.answer(
-            "✅ Siz barcha kerakli kanallarga obuna bo‘lgansiz.\n"
+            "✅ Siz barcha kerakli kanallarga obuna bo'lgansiz.\n"
             "Endi kino kodini yoki nomini yuborishingiz mumkin.",
             reply_markup=main_user_menu(),
         )
