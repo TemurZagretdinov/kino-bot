@@ -72,7 +72,7 @@ def top_movies_inline_keyboard(movies: Sequence[Movie]) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text=f"{index}. {_content_icon(movie)} {_trim_button_text(movie.title)}",
-                callback_data=f"movie_by_id:{movie.id}",
+                callback_data=f"top_movie:{movie.code}",
             )
         ]
         for index, movie in enumerate(movies, start=1)

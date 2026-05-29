@@ -499,6 +499,69 @@ async def unknown_text_handler(message: Message, bot: Bot, state: FSMContext) ->
 # Callback handlers
 # ---------------------------------------------------------------------------
 
+@router.callback_query(F.data.startswith("top_movie:"))
+async def top_movie_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    state: FSMContext,
+) -> None:
+    if callback.from_user is None:
+        await callback.answer()
+        return
+
+    data = callback.data or ""
+    try:
+        code = normalize_code(data.split(":", 1)[1])
+    except IndexError:
+        await callback.answer("Kino kodi topilmadi.", show_alert=True)
+        return
+
+    if not code:
+        await callback.answer("Kino kodi topilmadi.", show_alert=True)
+        return
+
+    await _save_pending_movie_request(
+        state,
+        callback.from_user,
+        movie_code=code,
+        movie_id=None,
+        search_type="top_movie",
+    )
+
+    if callback.message is None:
+        await callback.answer()
+        return
+
+    is_allowed = await _check_subscription_or_prompt(
+        callback.message,
+        bot,
+        callback.from_user.id,
+    )
+    if not is_allowed:
+        await callback.answer()
+        return
+
+    async with AsyncSessionLocal() as session:
+        user = await upsert_user(session, callback.from_user)
+        result = await find_content(session, code)
+
+        if result["type"] == "not_found":
+            await callback.answer("❌ Kino topilmadi!", show_alert=True)
+            return
+
+        first = result["items"][0] if result["items"] else None
+        await record_search(session, user, code, first)
+
+    await callback.answer()
+    await _deliver_content_result(
+        callback.message,
+        bot,
+        callback.from_user.id,
+        result,
+    )
+    await state.clear()
+
+
 @router.callback_query(F.data.startswith("movie_by_id:"))
 async def movie_by_id_callback(
     callback: CallbackQuery,
