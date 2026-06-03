@@ -5,5 +5,3 @@ asyncpg
 pydantic-settings
 python-dotenv
 rapidfuzz
-fastapi
-uvicorn

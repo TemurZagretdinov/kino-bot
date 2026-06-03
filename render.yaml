@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: telegram-bot-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ARCHIVE_CHANNEL_IDS
+        sync: false

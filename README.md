@@ -207,3 +207,17 @@ project/
 - Reklama yuborishda botni bloklagan userlar sabab jarayon to‘xtab qolmaydi.
 - `/cancel` komandasi admin FSM jarayonini bekor qiladi.
 - Bot restart bo‘lsa ham foydalanuvchilar, kinolar, kanallar va qidiruvlar database’da saqlanadi.
+
+## Render Background Worker
+
+Production Render deployment notes are in `RENDER_WORKER.md`.
+
+For a polling Telegram bot, deploy as a Render Background Worker with:
+
+```bash
+python bot.py
+```
+
+Do not run this project as a Web Service unless you intentionally add an HTTP
+server back. The worker deployment does not use `PORT`, FastAPI, Flask, uvicorn,
+or Telegram webhooks.
